@@ -1,13 +1,13 @@
 # Linear Obstacle Sampler & Aggregator
 A command-line tool to split linear obstacles in small even parts, sample the ground elevation of the DEM and aggregate obstacle lines with similar crest levels.
 
-## Assumptations
+## Assumptions
 * The obstacles are split in even parts of 20 m.
 * For every vertice on the line a 20 m long perpendicular line is created to each side of the obstacle with a resolution of 1m (a vertice atleast every 1m). The DEM is sampled along this line.
 * The 95th percentile value of the sampled raster value is added as crest level.
 * The user has control over which DEM values to filter out. For instance NoData values, but also burned values in the raster that are not representative of actual heights.
 * The user has control over the aggregation threshold of neighbouring obstacles. If 0.1 m is set, crest level values within a margin of -0.1 and +0.1 are considered similar.
-* After aggregation of lines, the mean value of all aggregated crest levels is added as the crest level for the aggregated line.
+* After the aggregation of lines, the mean value of all aggregated crest levels is added as the crest level for the aggregated line.
 
 ## Output
 A geopackage containing:
@@ -16,7 +16,7 @@ A geopackage containing:
 * Sampled obstacles
 * Aggregated obstacles
 
-This output can be used to check the output of the tool.
+The output can be used to validate the output of the tool.
 
 ## Usage
 ```
