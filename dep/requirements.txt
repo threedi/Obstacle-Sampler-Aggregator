@@ -1,0 +1,9 @@
+python>=3.8
+argparse
+pathlib
+tqdm
+numpy
+pandas
+geopandas
+shapely
+rasterio
