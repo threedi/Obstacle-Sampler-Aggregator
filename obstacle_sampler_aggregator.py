@@ -25,14 +25,21 @@ class LayerEmpty(Exception):
 class Obstacle_Sampler_Aggregator:
     name = "Threedi Linear Obstacle Sampler & Aggregator"
     
-    def __init__(self, obstacles_path, DEM_path, obstacles_layer_name=None, aggregation_threshold=0.1, 
-                 dem_filter_values = [-9999, 10]):
+    def __init__(self, obstacles_path, DEM_path, obstacles_layer_name=None, 
+                 dem_filter_values = [-9999, 10], no_split=False, no_aggregate=False,
+                 aggregation_threshold=0.1, splitting_segment_length=20, sampling_buffer_size=1, 
+                 percentile=0.95):
         
         self.obstacles_path = Path(obstacles_path)
         self.DEM_path = Path(DEM_path)
         self.obstacles_layer_name = obstacles_layer_name
-        self.aggregation_threshold = aggregation_threshold
         self.dem_filter_values = dem_filter_values
+        self.no_split = no_split
+        self.no_aggregate = no_aggregate
+        self.aggregation_threshold = aggregation_threshold
+        self.splitting_segment_length = splitting_segment_length
+        self.sampling_buffer_size = sampling_buffer_size
+        self.percentile = percentile
         
         self.check_file_exists(self.obstacles_path)
         self.check_file_exists(self.DEM_path)
@@ -46,36 +53,45 @@ class Obstacle_Sampler_Aggregator:
         self.fixed_obstacles = self.fix_invalid_geometries(self.obstacles)
         
         # Prepare obstacles by splitting
-        self.fixed_obstacles = self.fixed_obstacles.explode(index_parts=False) # Mutli to Single
-        self.fixed_obstacles['geometry'] = self.fixed_obstacles['geometry'].apply(lambda geom: geom.simplify(0.5))
-        self.splitted_obstacles = self.split_line_geometries(self.fixed_obstacles, 20)
+        if not self.no_split:
+            self.fixed_obstacles = self.fixed_obstacles.explode(index_parts=False) # Mutli to Single
+            self.fixed_obstacles['geometry'] = self.fixed_obstacles['geometry'].apply(lambda geom: geom.simplify(0.5))
+            self.splitted_obstacles = self.split_line_geometries(self.fixed_obstacles, self.splitting_segment_length)
+        else:
+            self.splitted_obstacles = self.fixed_obstacles.copy()
         
         # Sample raster values
         self.sampled_obstacles = self.extract_raster_values(self.splitted_obstacles, self.raster, 
                                                             filter_values=self.dem_filter_values)
         
         # Prepare recursive aggregation
-        initial_gdf = self.sampled_obstacles.explode(index_parts=False)
-        initial_gdf["store_values"] = initial_gdf['95th percentile value'].apply(lambda x: [round(x, 2)])
-        initial_gdf = initial_gdf.drop(columns=['95th percentile value'])
-        
-        # Recursive aggregation
-        self.aggregated_obstacles = self.recursive_aggregation(initial_gdf)
-        
-        # Compute length and crest level       
-        self.aggregated_obstacles['length'] = round(self.aggregated_obstacles['geometry'].length, 1)
-        self.aggregated_obstacles['crest_level'] = self.aggregated_obstacles['store_values'].apply(lambda x: round(sum(x) / len(x), 2) if x else None)
-        
-        # Prepare output
-        self.aggregated_obstacles['store_values'] = self.aggregated_obstacles['store_values'].apply(lambda x: str(x))
+        if not self.no_aggregate:
+            initial_gdf = self.sampled_obstacles.explode(index_parts=False)
+            initial_gdf["store_values"] = initial_gdf[f"{str(int(100*self.percentile))} percentile value"].apply(lambda x: [round(x, 2)])
+            initial_gdf = initial_gdf.drop(columns=[f"{str(int(100*self.percentile))} percentile value"])
+            
+            # Recursive aggregation
+            self.aggregated_obstacles = self.recursive_aggregation(initial_gdf)
+            
+            # Compute length and crest level       
+            self.aggregated_obstacles['length'] = round(self.aggregated_obstacles['geometry'].length, 1)
+            self.aggregated_obstacles['crest_level'] = self.aggregated_obstacles['store_values'].apply(lambda x: round(sum(x) / len(x), 2) if x else None)
+            
+            # Prepare output
+            self.aggregated_obstacles['store_values'] = self.aggregated_obstacles['store_values'].apply(lambda x: str(x))
         
         # Write output               
         output_path = self.obstacles_path.parent / (self.obstacles_path.stem + '_crest_level_sampler' + self.obstacles_path.suffix)
         self.write(self.obstacles, output_path, layer='input obstacles')
-        self.splitted_obstacles.drop(columns=['raster_values'], inplace=True)
-        self.write(self.splitted_obstacles, output_path, layer='splitted obstacles')
+
+        if not self.no_split:
+            self.splitted_obstacles.drop(columns=['raster_values'], inplace=True)
+            self.write(self.splitted_obstacles, output_path, layer='splitted obstacles')
+
         self.write(self.sampled_obstacles, output_path, layer='sampled obstacles')
-        self.write(self.aggregated_obstacles, output_path, layer='aggregated obstacles')
+
+        if not self.no_aggregate:
+            self.write(self.aggregated_obstacles, output_path, layer='aggregated obstacles')
         
         
     def recursive_aggregation(self, gdf, buffer_distance=0.01, threshold=10, recursion_count=0):
@@ -179,22 +195,22 @@ class Obstacle_Sampler_Aggregator:
     def extract_raster_values(self, gdf, raster, filter_values=[-9999, 10]):
         """
         Extracts raster values around each linestring in a GeoDataFrame.
-        Adds a new column '95th percentile value' with the 95th percentile value for each linestring.
+        Adds a new column 'percentile value' with the percentile value for each linestring.
     
         Parameters:
         - gdf (geopandas.GeoDataFrame): GeoDataFrame with linestring geometries.
         - raster (rasterio._io.RasterReader): Rasterio DatasetReader object.
     
         Returns:
-        - gdf (geopandas.GeoDataFrame): Updated GeoDataFrame with the '95th percentile value' column.
+        - gdf (geopandas.GeoDataFrame): Updated GeoDataFrame with the 'percentile value' column.
         """
      
         # Apply the function to get raster values for each row
         tqdm.pandas(desc="Sampling DEM for lines", unit="lines")
         gdf['raster_values'] = gdf['geometry'].progress_apply(lambda geom: self._get_raster_value(geom, raster, filter_values))
         
-        # Calculate the 95th percentile value for each row
-        gdf['95th percentile value'] = gdf['raster_values'].apply(lambda x: np.percentile(x, 95))
+        # Calculate the percentile value for each row
+        gdf[f"{str(int(100*self.percentile))} percentile value"] = gdf['raster_values'].apply(lambda x: np.percentile(x, self.percentile * 100) if x else None)
     
         # Drop temporary column
         gdf = gdf.drop(columns=['raster_values'])
@@ -207,6 +223,7 @@ class Obstacle_Sampler_Aggregator:
         # Check if the line intersects with the raster extent
         bounds = geometry.bounds
         raster_extent = raster.bounds
+        pixel_size = raster.res[0]
                
         if not (bounds[0] < raster_extent[2] and bounds[2] > raster_extent[0] and
                 bounds[1] < raster_extent[3] and bounds[3] > raster_extent[1]):
@@ -215,7 +232,7 @@ class Obstacle_Sampler_Aggregator:
     
         # Create a line perpendicular to the input line at each vertex
         for point in geometry.coords:
-            perpendicular_line = self.perpendicular_line_at_vertex(geometry, point, 20).segmentize(1)
+            perpendicular_line = self.perpendicular_line_at_vertex(geometry, point, self.sampling_buffer_size).segmentize(pixel_size)
             new_values = self.sample_raster_values(perpendicular_line, raster, filter_values)
             if new_values:
                 values.extend(new_values)
@@ -378,14 +395,22 @@ class Obstacle_Sampler_Aggregator:
         else:
             gdf.to_file(path)
                           
-def run(obstacles_path, DEM_path, obstacles_layer_name=None, aggregation_threshold=0.1, dem_filter_values=[-9999, 10]):
+def run(
+        obstacles_path, DEM_path, obstacles_layer_name=None, dem_filter_values=[-9999, 10],
+        no_split=False, no_aggregate=False, aggregation_threshold=0.1, splitting_segment_length=20,
+        sampling_buffer_size=1, percentile=0.95):
 
     obstacle_sampler_aggregator = Obstacle_Sampler_Aggregator(
         obstacles_path = obstacles_path, 
         obstacles_layer_name = obstacles_layer_name,
         DEM_path = DEM_path,
-        aggregation_threshold = aggregation_threshold,
-        dem_filter_values = dem_filter_values
+        dem_filter_values = dem_filter_values,
+        no_split = no_split,
+        no_aggregate = no_aggregate,
+        aggregation_threshold=aggregation_threshold,
+        splitting_segment_length = splitting_segment_length,
+        sampling_buffer_size = sampling_buffer_size,
+        percentile = percentile
     )
     
 def get_parser():
@@ -399,7 +424,7 @@ def get_parser():
     )
                
     parser.add_argument(
-        "--obstacles_layer_name", "-s", 
+        "--obstacles_layer_name", 
         help="Optional. Will be used as layer name in case obstacles_path is of format geopackage (.gpkg)",
     )
     
@@ -407,17 +432,44 @@ def get_parser():
         "DEM_path",
         help="Required. Path to raster containing ground elevations. Most raster file extensions supported.",
     )    
-    
-    parser.add_argument(
-        "aggregation_threshold",
-        help=("Required. Threshold for aggregation of neighbouring obstacle lines. Value in meters in terms of +- elevation difference of crest levels."
-              "If 0.1 m is set, values within a margin of -0.1 and +0.1 are considered similar."),
-    )        
-    
+        
     parser.add_argument(
         "dem_filter_values",
         help="Required. Values that are not used to compute crest level from DEM sampling, like NoData values and burn values of channels.",
     )    
+
+    # argument for not splitting, save as True
+    parser.add_argument(
+        "--no_split", 
+        help="Optional. If set, the input lines are not split into smaller segments.",
+    )
+
+    # argument for not aggregating, save as True
+    parser.add_argument(
+        "--no_aggregate", 
+        help="Optional. If set, the input lines are not aggregated.",
+    )
+
+    parser.add_argument(
+        "--aggregation_threshold",
+        help=("Optional. Threshold for aggregation of neighbouring obstacle lines. Value in meters in terms of +- elevation difference of crest levels."
+              "If 0.1 m is set, values within a margin of -0.1 and +0.1 are considered similar. Default is 0.1 m."),
+    )       
+
+    parser.add_argument(
+        "--splitting_segment_length",
+        help="Optional. Maximum length of line segments after splitting. Value in meters. Default is 20 m.",
+    ) 
+
+    parser.add_argument(
+        "--sampling_buffer_size",
+        help="Optional. Buffer size in meters around the line to sample the DEM. Default is 1 m.",
+    )
+
+    parser.add_argument(
+        "--percentile",
+        help="Optional. Percentile value to compute the crest level. Default is 0.95.",
+    )
     
     return parser
 
